@@ -24,15 +24,15 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,
 )
 
-# Periodic tasks configuration (beat_schedule)
+# Periodic tasks configuration (beat_schedule) - REVISED for WebSocket + Batching
 celery_app.conf.beat_schedule = {
-    "discover-traders": {
-        "task": "app.services.tasks.task_discover_traders",
-        "schedule": 15.0 * 60,  # Every 15 minutes
+    "manage-discovery-stream": {
+        "task": "app.services.tasks.task_manage_discovery_stream",
+        "schedule": 30.0 * 60,  # Every 30 minutes (restart WebSocket connection)
     },
-    "track-traders": {
-        "task": "app.services.tasks.task_track_traders",
-        "schedule": 60.0,  # Every 1 minute
+    "track-traders-batch": {
+        "task": "app.services.tasks.task_track_traders_batch",
+        "schedule": 75.0,  # Every 75 seconds (safe rate limiting: configurable BATCH_SIZE * 20 weight)
     },
     "calculate-leaderboard": {
         "task": "app.services.tasks.task_calculate_leaderboard",

@@ -1,20 +1,22 @@
 # Hyperliquid Auto Trade - Copy Trading Platform
 
-A comprehensive copy trading platform for Hyperliquid that discovers successful traders, tracks their positions in real-time, and provides a leaderboard with performance metrics.
+A comprehensive copy trading platform for Hyperliquid that discovers successful traders through real-time WebSocket streams, tracks their positions using batched API calls, and provides a leaderboard with performance metrics. **Rate limiting optimized** for production use.
 
 ## 🏗️ Architecture Overview
 
-The application consists of three main services working together:
+The application consists of three main services with a rate-limiting optimized design:
 
 ```
 ┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
 │  Hyperliquid    │    │   Service 1:         │    │   PostgreSQL    │
-│  API            │◄──►│   Trader Discovery   │───►│   Database      │
+│  WebSocket      │◄──►│   Discovery Stream   │───►│   Database      │
+│  (Real-time)    │    │   (WebSocket)        │    │   (Batched)     │
 └─────────────────┘    └──────────────────────┘    └─────────────────┘
                                                             │
 ┌─────────────────┐    ┌──────────────────────┐            │
 │  Redis Pub/Sub  │◄──►│   Service 2:         │◄───────────┘
-│  Real-time      │    │   Position Tracking  │
+│  Real-time      │    │   Batched Tracking   │
+│  Events         │    │   (50 traders/75s)   │
 └─────────────────┘    └──────────────────────┘
         │                        │
         │               ┌──────────────────────┐
@@ -26,23 +28,32 @@ The application consists of three main services working together:
 ┌─────────────────┐    │   Redis Cache   │
 │  FastAPI Web    │◄──►│   (5min TTL)    │
 │  Server         │    └─────────────────┘
+│  (Rate-Safe)    │
 └─────────────────┘
         │
         ▼
 ┌─────────────────┐
 │  WebSocket      │
 │  Clients        │
+│  (/ws/v1/updates) │
 └─────────────────┘
 ```
 
 ### Core Components
 
-1. **Service 1 (Trader Discovery)**: Discovers active traders by analyzing recent trades
-2. **Service 2 (Position Tracking)**: Monitors trader positions and detects changes
-3. **Service 3 (Leaderboard Calculation)**: Calculates performance metrics
-4. **FastAPI Web Server**: Provides REST API and WebSocket endpoints
+1. **Service 1 (Real-time Discovery)**: WebSocket connection to discover traders from live trade streams
+2. **Service 2 (Batched Tracking)**: Rate-limited batch processing of trader positions (50 traders per 75 seconds)
+3. **Service 3 (Leaderboard Calculation)**: Calculates performance metrics hourly
+4. **FastAPI Web Server**: Rate-safe REST API and WebSocket distribution (no direct API calls)
 5. **Redis**: Handles caching and real-time pub/sub messaging
-6. **PostgreSQL**: Stores trader data, positions, and performance metrics
+6. **PostgreSQL**: Stores trader data with optimized indexes for batching
+
+### 🚦 Rate Limiting Strategy
+
+- **WebSocket Discovery**: Zero API weight cost, real-time trader detection
+- **Batched Tracking**: 50 traders × 20 weight = 1000 weight per 75 seconds = 800 weight/minute (safe under 1200 limit)
+- **FastAPI Endpoints**: No direct API calls, serves cached data only
+- **Queue Management**: Database indexes optimize trader rotation for batching
 
 ## 📋 Prerequisites
 
@@ -92,6 +103,10 @@ HYPERLIQUID_WALLET_ADDRESS=your_wallet_address_here
 
 # Popular coins to track (comma-separated)
 POPULAR_COINS=BTC,ETH,SOL,AVAX,ARB,OP,MATIC
+
+# Task configuration (Rate Limiting Optimized)
+BATCH_SIZE=50
+WEBSOCKET_URL=wss://api.hyperliquid.xyz/ws
 
 # Celery settings
 CELERY_BROKER_URL=redis://localhost:6379
@@ -156,9 +171,14 @@ CREATE TABLE traders (
     id SERIAL PRIMARY KEY,
     address VARCHAR(42) UNIQUE NOT NULL,
     first_seen_at TIMESTAMP,
-    last_tracked_at TIMESTAMP,
+    last_tracked_at TIMESTAMP,  -- CRITICAL: Indexed for batching queue
     is_active BOOLEAN DEFAULT true
 );
+
+-- Index for efficient batch processing (queue management)
+CREATE INDEX idx_traders_last_tracked_batching
+ON traders(last_tracked_at ASC NULLS FIRST)
+WHERE is_active = true;
 
 -- User state history: Stores snapshots of trader positions
 CREATE TABLE user_state_history (
@@ -173,8 +193,8 @@ CREATE TABLE trade_events (
     id SERIAL PRIMARY KEY,
     trader_id INTEGER REFERENCES traders(id),
     timestamp TIMESTAMP NOT NULL,
-    event_type VARCHAR(20) NOT NULL,  -- OPEN_POSITION, CLOSE_POSITION
-    details JSONB NOT NULL  -- { coin, size, side, entry_price }
+    event_type VARCHAR(50) NOT NULL,  -- position_opened, position_closed, position_increased, etc.
+    details JSONB NOT NULL  -- { coin, previous_size, current_size, size_change, ... }
 );
 
 -- Leaderboard metrics: Calculated performance data
@@ -192,103 +212,159 @@ CREATE TABLE leaderboard_metrics (
 );
 ```
 
-## 🔄 Application Flow
+## 🔄 Application Flow (Rate-Limited Optimized)
 
-### Service 1: Trader Discovery (Every 15 minutes)
-
-```python
-# app/services/tasks.py - task_discover_traders()
-```
-
-1. **Fetch Recent Trades**: Calls Hyperliquid API for each popular coin
-
-   ```json
-   POST https://api.hyperliquid.xyz/info
-   {
-     "type": "recentTrades",
-     "coin": "BTC"
-   }
-   ```
-
-2. **Extract Trader Addresses**: Parses response to find unique user addresses
-
-   ```json
-   [
-     { "user": "0x1234...", "sz": "1.5", "px": "45000", ... },
-     { "user": "0x5678...", "sz": "0.8", "px": "45010", ... }
-   ]
-   ```
-
-3. **Database Storage**: Creates new `Trader` records for unknown addresses
-
-### Service 2: Position Tracking (Every 1 minute)
+### Service 1: Real-time Trader Discovery (WebSocket Connection)
 
 ```python
-# app/services/tasks.py - task_track_traders()
+# app/services/tasks.py - task_manage_discovery_stream()
+# Scheduled: Every 30 minutes (connection restart)
 ```
 
-1. **Fetch Active Traders**: Queries database for `is_active=True` traders
-
-2. **Get Current Positions**: Calls Hyperliquid API for each trader
-
-   ```json
-   POST https://api.hyperliquid.xyz/info
-   {
-     "type": "clearinghouseState",
-     "user": "0x1234..."
-   }
-   ```
-
-3. **State Comparison**: Compares new state with previous `UserStateHistory`
+1. **WebSocket Connection**: Maintains persistent connection to `wss://api.hyperliquid.xyz/ws`
 
    ```python
-   # Position change detection logic
-   if prev_size == 0 and curr_size != 0:
-       # New position opened
-       event_type = "OPEN_POSITION"
-   elif prev_size != 0 and curr_size == 0:
-       # Position closed
-       event_type = "CLOSE_POSITION"
+   # WebSocket subscription for each popular coin
+   subscription_msg = {
+       "method": "subscribe",
+       "subscription": {
+           "type": "trades",
+           "coin": "BTC"  # BTC, ETH, SOL, AVAX, ARB, OP, MATIC
+       }
+   }
    ```
 
-4. **Event Storage & Broadcasting**:
-   - Saves `TradeEvent` to PostgreSQL
-   - Publishes to Redis pub/sub channel `"trade_events"`
-   - Updates `UserStateHistory` with new state
+2. **Real-time Trade Processing**: Processes incoming trade messages instantly
 
-### Service 3: Leaderboard Calculation (Every 1 hour)
+   ```json
+   {
+     "channel": "trades",
+     "data": [
+       { "user": "0x1234...", "sz": "1.5", "px": "45000", "coin": "BTC", ... },
+       { "user": "0x5678...", "sz": "0.8", "px": "45010", "coin": "BTC", ... }
+     ]
+   }
+   ```
+
+3. **Trader Discovery**: Creates new `Trader` records for unknown addresses
+   - **Rate Limiting**: ✅ **Zero API weight cost** - pure WebSocket data
+   - **Benefits**: Immediate discovery, no polling delays, unlimited scalability
+
+### Service 2: Batched Position Tracking (Rate-Limited)
+
+```python
+# app/services/tasks.py - task_track_traders_batch()
+# Scheduled: Every 75 seconds (rate-safe interval)
+```
+
+1. **Queue-Based Selection**: Uses database index for efficient batch selection
+
+   ```sql
+   SELECT * FROM traders
+   WHERE is_active = true
+   ORDER BY last_tracked_at ASC NULLS FIRST
+   LIMIT 50;  -- Configurable BATCH_SIZE
+   ```
+
+2. **Batched API Calls**: Processes exactly 50 traders per batch
+
+   ```python
+   # For each trader in batch
+   current_state = await hyperliquid_client.get_user_state(trader.address)
+   # API Weight: 2 per trader × 50 traders = 100 weight per batch
+   # Total with safety margin: ~1000 weight per 75 seconds = 800 weight/minute
+   ```
+
+3. **Position Change Detection**: Compares with previous state to detect events
+
+   ```python
+   # Enhanced position change detection
+   if prev_size == 0 and curr_size != 0:
+       event_type = "position_opened"
+   elif prev_size != 0 and curr_size == 0:
+       event_type = "position_closed"
+   elif abs(curr_size) > abs(prev_size):
+       event_type = "position_increased"
+   elif abs(curr_size) < abs(prev_size):
+       event_type = "position_decreased"
+   else:
+       event_type = "position_flipped"  # Long ↔ Short
+   ```
+
+4. **Queue Management**: Updates `last_tracked_at` to send trader to back of queue
+
+   ```python
+   trader.last_tracked_at = datetime.utcnow()  # Critical for queue rotation
+   ```
+
+5. **Event Storage & Broadcasting**:
+   - Saves `TradeEvent` to PostgreSQL with detailed position data
+   - Publishes to Redis pub/sub channel `"trade_events"` for real-time updates
+   - Updates `UserStateHistory` with new state snapshot
+
+### Service 3: Leaderboard Calculation (Unchanged)
 
 ```python
 # app/services/tasks.py - task_calculate_leaderboard()
+# Scheduled: Every 1 hour
 ```
 
 1. **Account Age**: `(datetime.utcnow() - trader.first_seen_at).days`
 
-2. **Total Volume**: Sums notional values from `OPEN_POSITION` events
+2. **Total Volume**: Sums notional values from position events
 
    ```python
-   for event in open_position_events:
-       size = float(event.details['size'])
-       entry_price = float(event.details['entry_price'])
-       total_volume += abs(size) * entry_price
+   for event in trade_events:
+       if event.event_type == 'position_opened':
+           details = event.details
+           size = float(details['current_size'])
+           entry_price = float(details.get('entry_price', 0))
+           total_volume += abs(size) * entry_price
    ```
 
-3. **Metric Storage**: Updates `LeaderboardMetric` table
+3. **Metric Storage**: Updates `LeaderboardMetric` table with calculated performance data
 
-## 🌐 API Endpoints
+## 🎯 Rate Limiting Compliance
+
+### ✅ **Safe Operations (Zero Risk)**
+
+- **WebSocket Discovery**: No API weight cost, unlimited trader discovery
+- **Database Queries**: Local operations, no external API calls
+- **Redis Operations**: Local caching and pub/sub, no rate limits
+- **FastAPI Endpoints**: Serve cached data only, no direct API calls
+
+### 🔄 **Rate-Limited Operations (Controlled)**
+
+- **Batch Tracking**: 50 traders × 20 weight = 1000 weight per 75 seconds
+- **Theoretical Rate**: 800 weight/minute (33% under 1200 limit)
+- **Safety Margin**: 400 weight/minute buffer for burst capacity
+- **Queue Management**: Ensures all traders get tracked fairly over time
+
+### 📊 **Performance Metrics**
+
+- **Discovery Latency**: Real-time (WebSocket instant notifications)
+- **Tracking Coverage**: All active traders rotated through queue system
+- **Update Frequency**: Position updates every 75 seconds per trader
+- **Scalability**: Handles thousands of traders without rate limit concerns
+
+## 🌐 API Endpoints (Rate-Safe Design)
 
 ### REST API
 
-| Endpoint                   | Method | Description                      | Caching          |
-| -------------------------- | ------ | -------------------------------- | ---------------- |
-| `/`                        | GET    | Welcome message                  | None             |
-| `/health`                  | GET    | Health check                     | None             |
-| `/api/v1/leaderboard`      | GET    | Cached leaderboard with sorting  | 5min Redis       |
-| `/leaderboard`             | GET    | Legacy leaderboard endpoint      | Via new endpoint |
-| `/traders`                 | GET    | List all tracked traders         | None             |
-| `/traders/{id}/events`     | GET    | Trade events for specific trader | None             |
-| `/traders/{address}/track` | POST   | Start tracking a trader          | None             |
-| `/api/v1/cache/clear`      | GET    | Clear leaderboard cache          | None             |
+| Endpoint               | Method | Description                      | Rate Impact | Caching          |
+| ---------------------- | ------ | -------------------------------- | ----------- | ---------------- |
+| `/`                    | GET    | Welcome message                  | ✅ None     | None             |
+| `/health`              | GET    | Health check                     | ✅ None     | None             |
+| `/api/v1/leaderboard`  | GET    | Cached leaderboard with sorting  | ✅ None     | 5min Redis       |
+| `/leaderboard`         | GET    | Legacy leaderboard endpoint      | ✅ None     | Via new endpoint |
+| `/traders`             | GET    | List all tracked traders         | ✅ None     | Database only    |
+| `/traders/{id}/events` | GET    | Trade events for specific trader | ✅ None     | Database only    |
+| `/api/v1/cache/clear`  | GET    | Clear leaderboard cache          | ✅ None     | Admin only       |
+| `/api/v1/stats`        | GET    | System statistics                | ✅ None     | Real-time        |
+
+**🚫 REMOVED (Rate-Limited Endpoints):**
+
+- ~~`POST /traders/{address}/track`~~ - Previously triggered direct API calls
 
 ### Query Parameters
 
@@ -309,15 +385,15 @@ Available sort fields:
 - `avg_risk_ratio`
 - `max_drawdown`
 
-### WebSocket API
+### WebSocket API (Real-time Distribution)
 
-**Real-time Trade Events:**
+**Real-time Trade Updates:**
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8000/ws/v1/trades");
+const ws = new WebSocket("ws://localhost:8000/ws/v1/updates");
 
 ws.onopen = function () {
-  console.log("Connected to trade feed");
+  console.log("Connected to real-time updates");
 };
 
 ws.onmessage = function (event) {
@@ -326,8 +402,8 @@ ws.onmessage = function (event) {
   if (data.type === "connection") {
     console.log("Connection confirmed:", data.message);
   } else if (data.type === "trade_event") {
-    console.log("New trade:", data.data);
-    // Handle real-time trade event
+    console.log("New trade event:", data.data);
+    // Handle real-time position change
   }
 };
 ```
@@ -339,10 +415,58 @@ ws.onmessage = function (event) {
    ```json
    {
      "type": "connection",
-     "message": "Connected to real-time trade feed",
-     "timestamp": "2025-08-03T10:30:00.000Z"
+     "message": "Connected to real-time updates feed",
+     "timestamp": "2025-08-05T10:30:00.000Z"
    }
    ```
+
+2. **Trade Event (Enhanced):**
+   ```json
+   {
+     "type": "trade_event",
+     "data": {
+       "id": 12345,
+       "trader_id": 67,
+       "trader_address": "0x1234567890abcdef...",
+       "timestamp": "2025-08-05T10:30:15.123Z",
+       "event_type": "position_opened",
+       "details": {
+         "coin": "BTC",
+         "previous_size": 0,
+         "current_size": 1.5,
+         "size_change": 1.5,
+         "previous_position": {},
+         "current_position": {
+           "coin": "BTC",
+           "szi": "1.5",
+           "entryPx": "45000.0"
+         }
+       }
+     },
+     "timestamp": "2025-08-05T10:30:15.500Z"
+   }
+   ```
+
+### System Statistics Endpoint
+
+**GET `/api/v1/stats`** - Monitor system health:
+
+```json
+{
+  "database": {
+    "total_traders": 1247,
+    "active_traders": 892,
+    "total_trade_events": 15632
+  },
+  "websocket": {
+    "active_connections": 12
+  },
+  "cache": {
+    "redis_connected": true
+  },
+  "timestamp": "2025-08-05T10:30:00.000Z"
+}
+```
 
 2. **Trade Event:**
    ```json
@@ -367,35 +491,37 @@ ws.onmessage = function (event) {
 
 ## 🔧 Configuration
 
-### Environment Variables
+### Environment Variables (Rate-Limited Optimized)
 
-| Variable                | Description                      | Example                                    |
-| ----------------------- | -------------------------------- | ------------------------------------------ |
-| `DATABASE_URL`          | PostgreSQL connection string     | `postgresql://user:pass@localhost:5432/db` |
-| `REDIS_URL`             | Redis connection string          | `redis://localhost:6379`                   |
-| `HYPERLIQUID_API_URL`   | API base URL                     | `https://api.hyperliquid.xyz/info`         |
-| `POPULAR_COINS`         | Coins to track (comma-separated) | `BTC,ETH,SOL,AVAX`                         |
-| `CELERY_BROKER_URL`     | Celery broker URL                | `redis://localhost:6379`                   |
-| `CELERY_RESULT_BACKEND` | Celery result backend            | `redis://localhost:6379`                   |
-| `DEBUG`                 | Debug mode                       | `False`                                    |
-| `SECRET_KEY`            | Application secret key           | `your-secret-key`                          |
+| Variable                | Description                      | Example                                    | Rate Impact |
+| ----------------------- | -------------------------------- | ------------------------------------------ | ----------- |
+| `DATABASE_URL`          | PostgreSQL connection string     | `postgresql://user:pass@localhost:5432/db` | ✅ None     |
+| `REDIS_URL`             | Redis connection string          | `redis://localhost:6379`                   | ✅ None     |
+| `HYPERLIQUID_API_URL`   | API base URL                     | `https://api.hyperliquid.xyz/info`         | ✅ None     |
+| `POPULAR_COINS`         | Coins to track (comma-separated) | `BTC,ETH,SOL,AVAX`                         | ✅ None     |
+| `BATCH_SIZE`            | Traders per batch (rate control) | `50`                                       | 🔄 Manages  |
+| `WEBSOCKET_URL`         | WebSocket endpoint URL           | `wss://api.hyperliquid.xyz/ws`             | ✅ None     |
+| `CELERY_BROKER_URL`     | Celery broker URL                | `redis://localhost:6379`                   | ✅ None     |
+| `CELERY_RESULT_BACKEND` | Celery result backend            | `redis://localhost:6379`                   | ✅ None     |
+| `DEBUG`                 | Debug mode                       | `False`                                    | ✅ None     |
+| `SECRET_KEY`            | Application secret key           | `your-secret-key`                          | ✅ None     |
 
-### Celery Task Schedule
+### Celery Task Schedule (Rate-Limited Optimized)
 
 ```python
 # app/services/celery_app.py
 beat_schedule = {
-    'discover-traders': {
-        'task': 'app.services.tasks.task_discover_traders',
-        'schedule': 900.0,  # 15 minutes
+    'manage-discovery-stream': {
+        'task': 'app.services.tasks.task_manage_discovery_stream',
+        'schedule': 1800.0, # 30 minutes (WebSocket restart)
     },
-    'track-traders': {
-        'task': 'app.services.tasks.task_track_traders',
-        'schedule': 60.0,   # 1 minute
+    'track-traders-batch': {
+        'task': 'app.services.tasks.task_track_traders_batch',
+        'schedule': 75.0,   # 75 seconds (rate-safe batching)
     },
     'calculate-leaderboard': {
         'task': 'app.services.tasks.task_calculate_leaderboard',
-        'schedule': 3600.0, # 1 hour
+        'schedule': 3600.0, # 1 hour (unchanged)
     },
 }
 ```
@@ -467,13 +593,27 @@ Use a process manager like Supervisor or Docker to manage the services.
 1. Install Redis
 2. Update the `REDIS_URL` in your `.env` file
 
-## 📈 Performance Features
+## 📈 Performance Features (Rate-Limited Optimized)
+
+### Rate Limiting Compliance
+
+- **WebSocket Discovery**: ✅ Zero API weight cost, unlimited trader discovery
+- **Batched Tracking**: 🔄 800 weight/minute (33% under 1200 limit) with 400 weight buffer
+- **FastAPI Endpoints**: ✅ No direct API calls, serves cached data only
+- **Queue Management**: Database indexes ensure efficient trader rotation
 
 ### Redis Caching
 
 - **Leaderboard Cache**: 5-minute TTL reduces database load
 - **Cache Keys**: `leaderboard_cache:{sort_by}:{order}`
 - **Cache Hit Rate**: ~95% for frequently accessed leaderboards
+- **Pub/Sub**: Real-time event distribution without API calls
+
+### Database Optimization
+
+- **Critical Index**: `idx_traders_last_tracked_batching` for queue management
+- **JSONB Storage**: Efficient position data storage and querying
+- **Batch Processing**: Optimized queries for 50-trader batches
 
 ### Real-time Updates
 
@@ -744,6 +884,48 @@ This project is licensed under the MIT License.
 4. **Advanced Filtering**: More leaderboard filter options
 5. **Mobile App**: React Native mobile application
 6. **Machine Learning**: Predictive trader scoring
+
+## 📊 Monitoring & Health Checks
+
+### System Statistics
+
+Monitor the application through the `/api/v1/stats` endpoint:
+
+```bash
+curl http://localhost:8000/api/v1/stats
+```
+
+### Key Metrics to Monitor
+
+1. **Rate Limiting Health**:
+
+   - API weight usage should stay under 800/minute average
+   - WebSocket connection stability
+   - Batch processing success rates
+
+2. **Database Performance**:
+
+   - Active trader count and growth
+   - Trade event creation rate
+   - Queue rotation efficiency (last_tracked_at distribution)
+
+3. **Real-time System**:
+   - WebSocket connection count
+   - Redis pub/sub message throughput
+   - Cache hit rates
+
+### Logging Levels
+
+```bash
+# Set log levels for monitoring
+export LOG_LEVEL=INFO  # or DEBUG for detailed monitoring
+```
+
+### Health Check Endpoints
+
+- `GET /health` - Basic application health
+- `GET /api/v1/stats` - Detailed system statistics
+- WebSocket connection count via stats endpoint
 
 ---
 

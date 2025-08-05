@@ -1,22 +1,56 @@
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Set
 import redis
 import json
+import asyncio
+import logging
 from datetime import datetime
 from app.core.config import settings
 from app.database.database import get_db
 from app.database.models import Trader, LeaderboardMetric, TradeEvent
-from app.services.tasks import track_trader_state
 
 app = FastAPI(
     title="Hyperliquid Auto Trade",
-    description="Analysis and copy trading service for Hyperliquid",
-    version="1.0.0"
+    description="Analysis and copy trading service for Hyperliquid - Rate Limited Optimized",
+    version="2.0.0"
 )
 
 # Initialize Redis client
 redis_client = redis.Redis.from_url(str(settings.REDIS_URL), decode_responses=True)
+logger = logging.getLogger(__name__)
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.add(websocket)
+        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.discard(websocket)
+        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+
+    async def send_to_all(self, message: dict):
+        """Send message to all connected clients"""
+        if not self.active_connections:
+            return
+            
+        disconnected = set()
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                disconnected.add(connection)
+        
+        # Remove disconnected clients
+        for connection in disconnected:
+            self.disconnect(connection)
+
+manager = ConnectionManager()
 
 class DateTimeEncoder(json.JSONEncoder):
     """Custom JSON encoder for datetime objects"""
@@ -32,22 +66,6 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
-
-@app.post("/traders/{address}/track")
-async def track_trader(address: str, db: Session = Depends(get_db)):
-    """Start tracking a trader by their wallet address."""
-    try:
-        # Check if trader already exists
-        existing_trader = db.query(Trader).filter(Trader.address == address).first()
-        if existing_trader:
-            return {"message": f"Trader {address} is already being tracked", "trader_id": existing_trader.id}
-        
-        # Trigger tracking task
-        track_trader_state.delay(address)
-        
-        return {"message": f"Started tracking trader {address}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/traders", response_model=List[dict])
 async def get_traders(db: Session = Depends(get_db)):
@@ -154,78 +172,101 @@ async def get_trader_events(trader_id: int, db: Session = Depends(get_db)):
         for event in events
     ]
 
-@app.websocket("/ws/v1/trades")
-async def websocket_trades(websocket: WebSocket):
-    """WebSocket endpoint for real-time trade events."""
-    await websocket.accept()
+@app.websocket("/ws/v1/updates")
+async def websocket_updates(websocket: WebSocket):
+    """
+    WebSocket endpoint for pushing real-time updates TO frontend clients.
+    
+    This endpoint:
+    1. Accepts connections from frontend clients
+    2. Subscribes to Redis pub/sub channel 'trade_events'
+    3. Forwards trade events from Celery workers to connected clients
+    4. Maintains clean separation: workers produce data, API distributes it
+    """
+    await manager.connect(websocket)
+    
+    # Create Redis pub/sub client for this connection
+    pubsub = redis_client.pubsub()
     
     try:
-        # Create Redis pub/sub client for real-time updates
-        pubsub = redis_client.pubsub()
+        # Subscribe to trade events channel
         pubsub.subscribe("trade_events")
         
         # Send initial connection confirmation
         await websocket.send_json({
             "type": "connection",
-            "message": "Connected to real-time trade feed",
+            "message": "Connected to real-time updates feed",
             "timestamp": datetime.utcnow().isoformat()
         })
         
-        # Listen for messages from Redis pub/sub
+        # Main message loop
         while True:
             try:
-                # Check for new messages (non-blocking)
+                # Check for new messages from Redis pub/sub (non-blocking with timeout)
                 message = pubsub.get_message(timeout=1.0)
                 
                 if message and message['type'] == 'message':
                     try:
-                        # Parse and forward trade event
+                        # Parse trade event data
                         trade_data = json.loads(message['data'])
+                        
+                        # Forward to this specific client
                         await websocket.send_json({
                             "type": "trade_event",
                             "data": trade_data,
                             "timestamp": datetime.utcnow().isoformat()
                         })
-                    except json.JSONDecodeError:
-                        # Skip invalid JSON messages
+                        
+                        logger.debug(f"Sent trade event to client: {trade_data.get('trader_address', 'unknown')}")
+                        
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in Redis message: {e}")
                         continue
+                    except Exception as e:
+                        logger.error(f"Error processing trade event: {e}")
                 
-                # Check if WebSocket is still connected
+                # Ping/pong to detect disconnected clients
                 try:
-                    await websocket.receive_text()
+                    await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    # No message received, continue listening
+                    continue
                 except WebSocketDisconnect:
+                    logger.info("Client disconnected normally")
                     break
                     
             except Exception as e:
-                # Send error message and continue
+                logger.error(f"Error in WebSocket message loop: {e}")
                 try:
                     await websocket.send_json({
                         "type": "error",
-                        "message": f"Error processing message: {str(e)}",
+                        "message": f"Error processing updates: {str(e)}",
                         "timestamp": datetime.utcnow().isoformat()
                     })
                 except:
-                    # If we can't send error message, connection is likely broken
+                    # If we can't send error message, connection is broken
                     break
                     
     except WebSocketDisconnect:
-        pass
+        logger.info("WebSocket disconnected")
     except Exception as e:
+        logger.error(f"WebSocket error: {e}")
         try:
             await websocket.send_json({
-                "type": "error",
-                "message": f"WebSocket error: {str(e)}",
+                "type": "error", 
+                "message": f"Connection error: {str(e)}",
                 "timestamp": datetime.utcnow().isoformat()
             })
         except:
             pass
     finally:
-        # Clean up pub/sub connection
+        # Clean up
+        manager.disconnect(websocket)
         try:
             pubsub.unsubscribe("trade_events")
             pubsub.close()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error cleaning up pubsub: {e}")
 
 @app.get("/api/v1/cache/clear")
 async def clear_cache():
@@ -243,3 +284,33 @@ async def clear_cache():
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing cache: {str(e)}")
+
+@app.get("/api/v1/stats")
+async def get_stats(db: Session = Depends(get_db)):
+    """Get system statistics."""
+    try:
+        # Get database stats
+        total_traders = db.query(Trader).count()
+        active_traders = db.query(Trader).filter(Trader.is_active == True).count()
+        total_events = db.query(TradeEvent).count()
+        
+        # Get WebSocket stats
+        active_connections = len(manager.active_connections)
+        
+        return {
+            "database": {
+                "total_traders": total_traders,
+                "active_traders": active_traders,
+                "total_trade_events": total_events
+            },
+            "websocket": {
+                "active_connections": active_connections
+            },
+            "cache": {
+                "redis_connected": redis_client.ping()
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")

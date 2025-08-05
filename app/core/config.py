@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     HYPERLIQUID_WALLET_ADDRESS: Optional[str] = None
     
     # Popular coins to track (stored as string, accessed as list via property)
-    POPULAR_COINS: str = Field(default="BTC,ETH,SOL,AVAX,ARB,OP,MATIC", alias="POPULAR_COINS")
+    POPULAR_COINS_STR: str = Field(default="BTC,ETH,SOL,AVAX,ARB,OP,MATIC", alias="POPULAR_COINS")
+    
+    # Task configuration settings
+    BATCH_SIZE: int = Field(default=50, description="Number of traders to process per batch")
+    WEBSOCKET_URL: str = Field(default="wss://api.hyperliquid.xyz/ws", description="Hyperliquid WebSocket URL")
     
     # Celery settings
     CELERY_BROKER_URL: RedisDsn = "redis://localhost:6379"
@@ -32,7 +36,7 @@ class Settings(BaseSettings):
     @property
     def POPULAR_COINS(self) -> List[str]:
         """Return POPULAR_COINS as a list."""
-        return [coin.strip() for coin in self.POPULAR_COINS.split(',') if coin.strip()]
+        return [coin.strip() for coin in self.POPULAR_COINS_STR.split(',') if coin.strip()]
 
 # Single instance to be imported by other modules
 settings = Settings()

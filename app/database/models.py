@@ -24,20 +24,24 @@ class Trader(Base):
     )
     last_tracked_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
-        nullable=True
+        nullable=True,
+        index=True,  # CRITICAL: Index for Service 2 batching logic
+        comment="Last time this trader was tracked - used for batching in Service 2"
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     
     # Relationships
     state_history: Mapped[List["UserStateHistory"]] = relationship(
         "UserStateHistory",
         back_populates="trader",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        order_by="UserStateHistory.timestamp.desc()"
     )
     trade_events: Mapped[List["TradeEvent"]] = relationship(
         "TradeEvent",
         back_populates="trader",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        order_by="TradeEvent.timestamp.desc()"
     )
     leaderboard_metric: Mapped[Optional["LeaderboardMetric"]] = relationship(
         "LeaderboardMetric",
@@ -70,7 +74,7 @@ class UserStateHistory(Base):
     state_data: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,
-        comment="Raw JSON response from Hyperliquid userState endpoint"
+        comment="Raw JSON response from Hyperliquid clearinghouseState endpoint"
     )
     
     # Relationship
@@ -99,6 +103,7 @@ class TradeEvent(Base):
     event_type: Mapped[str] = mapped_column(
         String,
         nullable=False,
+        index=True,  # Index for filtering by event type
         comment="Event type: OPEN_POSITION, CLOSE_POSITION, MODIFY_POSITION, etc."
     )
     details: Mapped[dict] = mapped_column(
@@ -128,19 +133,21 @@ class LeaderboardMetric(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
-        nullable=False
+        nullable=False,
+        index=True  # Index for finding recently updated metrics
     )
-    account_age_days: Mapped[int] = mapped_column(Integer, nullable=False)
-    total_volume_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    account_age_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_volume_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, index=True)
     win_rate: Mapped[float] = mapped_column(
         Float,
         nullable=False,
         default=0.0,
+        index=True,  # Index for leaderboard sorting
         comment="Win rate as decimal (0.55 = 55%)"
     )
     avg_risk_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     max_drawdown: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    max_profit_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_profit_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, index=True)
     max_loss_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     
     # Relationship
