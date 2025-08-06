@@ -198,13 +198,18 @@ async def _process_trade_messages(trades: List[Dict[str, Any]]):
         
         for trade in trades:
             try:
-                user_address = trade.get("user")
-                if user_address:
-                    # Use helper function to get or create trader
-                    trader = get_or_create_trader(db, user_address)
-                    if trader.first_seen_at.replace(tzinfo=None) == trader.first_seen_at.replace(tzinfo=None):
-                        # This is a rough check for newly created traders
-                        new_traders_found += 1
+                # Extract trader addresses from the "users" array in the trade data
+                if "users" in trade and isinstance(trade["users"], list):
+                    for user_address in trade["users"]:
+                        if not user_address:
+                            continue
+                            
+                        # Use helper function to get or create trader
+                        trader = get_or_create_trader(db, user_address)
+                        # This will be true for new traders
+                        if hasattr(trader, 'first_seen_at') and trader.first_seen_at:
+                            if not hasattr(trader, '_sa_instance_state'):  # Check for new traders
+                                new_traders_found += 1
                         
             except Exception as e:
                 logger.error(f"Error processing trade message: {e}")
@@ -327,7 +332,9 @@ def task_calculate_leaderboard():
                     
                     # Calculate account_age_days
                     if trader.first_seen_at:
-                        age_delta = datetime.utcnow() - trader.first_seen_at
+                        # Use timezone-aware datetime to match trader.first_seen_at
+                        now = datetime.now(trader.first_seen_at.tzinfo)
+                        age_delta = now - trader.first_seen_at
                         metrics['account_age_days'] = age_delta.days
                     else:
                         metrics['account_age_days'] = 0

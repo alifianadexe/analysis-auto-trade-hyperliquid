@@ -1,15 +1,15 @@
 from typing import List, Optional
-from pydantic import Field, PostgresDsn, RedisDsn
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
     
     # Database settings
-    DATABASE_URL: PostgresDsn = "postgresql://user:password@localhost:5432/hyperliquid_db"
+    DATABASE_URL: str = "postgresql://hyperliquid_user:hyperliquid_password@localhost:5432/hyperliquid_db"
     
     # Redis settings
-    REDIS_URL: RedisDsn = "redis://localhost:6379"
+    REDIS_URL: str = "redis://localhost:6379"
     
     # Hyperliquid API settings
     HYPERLIQUID_API_URL: str = "https://api.hyperliquid.xyz/info"
@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     WEBSOCKET_URL: str = Field(default="wss://api.hyperliquid.xyz/ws", description="Hyperliquid WebSocket URL")
     
     # Celery settings
-    CELERY_BROKER_URL: RedisDsn = "redis://localhost:6379"
-    CELERY_RESULT_BACKEND: RedisDsn = "redis://localhost:6379"
+    CELERY_BROKER_URL: str = "redis://localhost:6379"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379"
     
     # Application settings
     DEBUG: bool = False
