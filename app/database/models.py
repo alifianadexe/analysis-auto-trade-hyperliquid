@@ -149,6 +149,13 @@ class LeaderboardMetric(Base):
     max_drawdown: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     max_profit_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, index=True)
     max_loss_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    trader_score: Mapped[float] = mapped_column(
+        Float, 
+        nullable=True, 
+        default=0.0, 
+        index=True,
+        comment="Composite score for ranking traders on the leaderboard"
+    )
     
     # Relationship
     trader: Mapped["Trader"] = relationship("Trader", back_populates="leaderboard_metric")

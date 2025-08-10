@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import logging
-from app.services.tasks import task_manage_discovery_stream
+from app.services.tasks.discovery_task import task_manage_discovery_stream
 from app.database.database import SessionLocal
 from app.database.models import Trader
 

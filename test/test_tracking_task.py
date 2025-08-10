@@ -6,7 +6,7 @@ from sqlalchemy import func
 
 from app.database.database import get_db, SessionLocal
 from app.database.models import Trader, UserStateHistory
-from app.services.tasks import _track_traders_batch_async
+from app.services.tasks.tracking_task import _track_traders_batch_async
 from app.services.hyperliquid_client import HyperliquidClient
 from app.core.config import settings
 

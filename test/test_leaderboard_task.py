@@ -4,7 +4,7 @@ from datetime import datetime
 
 from app.database.database import SessionLocal
 from app.database.models import Trader, LeaderboardMetric, TradeEvent
-from app.services.tasks import task_calculate_leaderboard
+from app.services.tasks.leaderboard_task import task_calculate_leaderboard
 
 # Configure logging
 logging.basicConfig(
