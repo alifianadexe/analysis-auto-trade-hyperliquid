@@ -47,6 +47,11 @@ class WebSocketDiscoveryService:
         """Handle shutdown signals"""
         logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+    
+    async def stop(self):
+        """Stop the discovery service"""
+        logger.info("🛑 Stopping WebSocket Discovery Service...")
+        self.running = False
         
     async def start(self):
         """Start the WebSocket discovery service"""

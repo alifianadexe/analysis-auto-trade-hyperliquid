@@ -1,16 +1,16 @@
 # Hyperliquid Auto Trade - Copy Trading Platform
 
-A comprehensive copy trading platform for Hyperliquid that discovers successful traders through real-time WebSocket streams, tracks their positions using batched API calls, and provides a leaderboard with performance metrics. **Rate limiting optimized** for production use.
+A comprehensive copy trading platform for Hyperliquid that discovers successful traders through real-time WebSocket streams, tracks their positions using batched API calls, and provides a leaderboard with performance metrics. **Linux-native** and **rate limiting optimized** for production use.
 
 ## 🏗️ Architecture Overview
 
-The application now consists of **4 separate services** managed by a process manager:
+The application consists of **4 separate services** managed by a Linux process manager:
 
 ```
 ┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
 │  Hyperliquid    │    │   Service 1:         │    │   PostgreSQL    │
 │  WebSocket      │◄──►│   Discovery Service  │───►│   Database      │
-│  (Real-time)    │    │   (Standalone)       │    │   (Batched)     │
+│  (Real-time)    │    │   (Standalone)       │    │   (Traders)     │
 └─────────────────┘    └──────────────────────┘    └─────────────────┘
                                                             │
 ┌─────────────────┐    ┌──────────────────────┐            │
@@ -29,27 +29,27 @@ The application now consists of **4 separate services** managed by a process man
 ┌─────────────────┐    │   Service 4:    │
 │  WebSocket      │◄──►│   FastAPI Web   │
 │  Clients        │    │   Server        │
-│  (/ws/v1/updates) │   │   (Rate-Safe)   │
+│  (/ws/v1/updates) │   │   (API + UI)    │
 └─────────────────┘    └─────────────────┘
 ```
 
-### 🚀 New Process Management System
+### 🚀 Linux Process Management System
 
-**Linux Process Manager** (`process_manager.py`):
+**Process Manager** (`process_manager.py`):
 
-- Manages all 4 services with dependency handling
-- Automatic restart on crashes (up to 5 attempts)
-- Service monitoring and health checks
-- Centralized logging to `logs/` directory
-- Graceful shutdown with proper signal handling
-- Linux process groups with `os.setsid` for clean shutdown
+- **Linux-native**: Uses `os.setsid` process groups and `SIGTERM`/`SIGKILL` signals
+- **Service orchestration**: Manages all 4 services with dependency handling
+- **Auto-recovery**: Restarts crashed services automatically (up to 5 attempts)
+- **Health monitoring**: Real-time monitoring with status display every 30 seconds
+- **Graceful shutdown**: Clean termination of process trees with proper signal handling
+- **Centralized logging**: Individual log files for each service in `logs/` directory
 
 ### Core Components
 
-1. **WebSocket Discovery Service** (Standalone): Real-time trader discovery via WebSocket
-2. **Celery Worker**: Batched trader position tracking and leaderboard calculation
-3. **Celery Beat Scheduler**: Manages periodic task execution
-4. **FastAPI Web Server**: Rate-safe REST API and WebSocket distribution
+1. **WebSocket Discovery Service** (Standalone): Real-time trader discovery via WebSocket streams
+2. **Celery Worker**: Batched trader position tracking with configurable concurrency (4 workers)
+3. **Celery Beat Scheduler**: Manages periodic task execution (tracking every 75s, leaderboard every 10min)
+4. **FastAPI Web Server**: Rate-safe REST API and real-time WebSocket distribution
 
 ## 📋 Prerequisites
 
@@ -285,13 +285,15 @@ CREATE TABLE leaderboard_metrics (
 );
 ```
 
-## 🔄 Application Flow (Rate-Limited Optimized)
+## 🔄 Application Flow (Linux-Native & Rate-Limited)
 
-### Service 1: Real-time Trader Discovery (WebSocket Connection)
+### Service 1: Real-time Trader Discovery (Standalone WebSocket Service)
 
-```python
-# app/services/tasks.py - task_manage_discovery_stream()
-# Scheduled: Every 30 minutes (connection restart)
+**No longer a Celery task** - Runs as independent process managed by ProcessManager:
+
+```bash
+# Launched by: start_discovery_service.py
+# Managed by: process_manager.py
 ```
 
 1. **WebSocket Connection**: Maintains persistent connection to `wss://api.hyperliquid.xyz/ws`
@@ -323,10 +325,10 @@ CREATE TABLE leaderboard_metrics (
    - **Rate Limiting**: ✅ **Zero API weight cost** - pure WebSocket data
    - **Benefits**: Immediate discovery, no polling delays, unlimited scalability
 
-### Service 2: Batched Position Tracking (Rate-Limited)
+### Service 2: Batched Position Tracking (Celery Task)
 
 ```python
-# app/services/tasks.py - task_track_traders_batch()
+# app/services/tasks/tracking_task.py - task_track_traders_batch()
 # Scheduled: Every 75 seconds (rate-safe interval)
 ```
 
@@ -353,15 +355,13 @@ CREATE TABLE leaderboard_metrics (
    ```python
    # Enhanced position change detection
    if prev_size == 0 and curr_size != 0:
-       event_type = "position_opened"
+       event_type = "OPEN_POSITION"
    elif prev_size != 0 and curr_size == 0:
-       event_type = "position_closed"
+       event_type = "CLOSE_POSITION"
    elif abs(curr_size) > abs(prev_size):
-       event_type = "position_increased"
+       event_type = "INCREASE_POSITION"
    elif abs(curr_size) < abs(prev_size):
-       event_type = "position_decreased"
-   else:
-       event_type = "position_flipped"  # Long ↔ Short
+       event_type = "DECREASE_POSITION"
    ```
 
 4. **Queue Management**: Updates `last_tracked_at` to send trader to back of queue
@@ -375,11 +375,11 @@ CREATE TABLE leaderboard_metrics (
    - Publishes to Redis pub/sub channel `"trade_events"` for real-time updates
    - Updates `UserStateHistory` with new state snapshot
 
-### Service 3: Leaderboard Calculation (Unchanged)
+### Service 3: Leaderboard Calculation (Celery Task)
 
 ```python
-# app/services/tasks.py - task_calculate_leaderboard()
-# Scheduled: Every 1 hour
+# app/services/tasks/leaderboard_task.py - task_calculate_leaderboard()
+# Scheduled: Every 10 minutes
 ```
 
 1. **Account Age**: `(datetime.utcnow() - trader.first_seen_at).days`
@@ -579,25 +579,23 @@ ws.onmessage = function (event) {
 | `DEBUG`                 | Debug mode                       | `False`                                    | ✅ None     |
 | `SECRET_KEY`            | Application secret key           | `your-secret-key`                          | ✅ None     |
 
-### Celery Task Schedule (Rate-Limited Optimized)
+### Celery Task Schedule (Current Configuration)
 
 ```python
 # app/services/celery_app.py
 beat_schedule = {
-    'manage-discovery-stream': {
-        'task': 'app.services.tasks.task_manage_discovery_stream',
-        'schedule': 1800.0, # 30 minutes (WebSocket restart)
-    },
     'track-traders-batch': {
-        'task': 'app.services.tasks.task_track_traders_batch',
+        'task': 'app.services.tasks.tracking_task.task_track_traders_batch',
         'schedule': 75.0,   # 75 seconds (rate-safe batching)
     },
     'calculate-leaderboard': {
-        'task': 'app.services.tasks.task_calculate_leaderboard',
-        'schedule': 3600.0, # 1 hour (unchanged)
+        'task': 'app.services.tasks.leaderboard_task.task_calculate_leaderboard',
+        'schedule': 600.0,  # 10 minutes (frequent updates)
     },
 }
 ```
+
+**Note**: WebSocket discovery service now runs standalone (not as a Celery task)
 
 3. Install dependencies:
 
@@ -715,11 +713,18 @@ app/
 │   └── models.py            # Database models (Trader, TradeEvent, etc.)
 └── services/
     ├── celery_app.py        # Celery configuration and scheduling
-    └── tasks.py             # Background task implementations
+    ├── discovery_service.py # Standalone WebSocket discovery service
+    ├── hyperliquid_client.py # Hyperliquid API client
+    └── tasks/
+        ├── tracking_task.py # Trader position tracking
+        ├── leaderboard_task.py # Leaderboard calculation
+        └── utils.py         # Shared utilities
 
 # Root files
+├── process_manager.py       # Linux process manager (main service orchestrator)
+├── start_discovery_service.py # Discovery service launcher
+├── start_all_services.sh    # Linux startup script
 ├── run.py                   # FastAPI server startup
-├── worker.py                # Celery worker startup
 ├── init_db.py               # Database initialization
 ├── docker-compose.yml       # Infrastructure services
 ├── requirements.txt         # Python dependencies

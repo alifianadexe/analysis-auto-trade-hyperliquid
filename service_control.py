@@ -18,7 +18,7 @@ def run_service_command(service, action):
     """Run a service command using the process manager"""
     commands = {
         'websocket-discovery': 'python start_discovery_service.py',
-        'celery-worker': 'python -m celery -A app.services.celery_app worker --loglevel=info --pool=solo',
+        'celery-worker': 'python -m celery -A app.services.celery_app worker --loglevel=info --concurrency=4',
         'celery-beat': 'python -m celery -A app.services.celery_app beat --loglevel=info',
         'fastapi-server': 'python run.py'
     }
@@ -38,7 +38,7 @@ def run_service_command(service, action):
         if log_file.exists():
             print(f"📋 Showing logs for {service}:")
             print("-" * 50)
-            with open(log_file, 'r', encoding='utf-8') as f:
+            with open(log_file, 'r') as f:
                 # Show last 50 lines
                 lines = f.readlines()
                 for line in lines[-50:]:

@@ -1,41 +1,86 @@
-# Task Revision Summary - WebSocket + Batching Strategy
+# Task Architecture Summary - Current Implementation
 
 ## Overview
 
-Revised the copy trading tasks due to rate limiting concerns with the original HTTP polling approach. The new implementation uses WebSocket for real-time trader discovery and batched REST API calls for position tracking.
+The Hyperliquid copy trading platform now uses a **4-service architecture** with a **standalone WebSocket discovery service** and **2 Celery tasks**. This design provides optimal rate limiting compliance, real-time performance, and Linux-native process management.
 
-## Key Changes Made
+## Current Architecture
 
-### 1. Service 1 - Trader Discovery (REVISED)
+### Service 1: WebSocket Discovery Service (Standalone)
 
-**Before:** `task_discover_traders()` - HTTP polling every 15 minutes
-**After:** `task_manage_discovery_stream()` - WebSocket connection management
+**Implementation**: `app/services/discovery_service.py`
+**Launcher**: `start_discovery_service.py`
+**Management**: Controlled by `process_manager.py`
 
-**New Implementation:**
+**Key Features**:
 
-- Maintains persistent WebSocket connection to `wss://api.hyperliquid.xyz/ws`
-- Subscribes to trades for popular coins (`BTC`, `ETH`, `SOL`, etc.)
-- Automatically discovers traders in real-time from trade streams
-- Includes reconnection logic with exponential backoff
-- Scheduled every 30 minutes to restart connection for reliability
+- **Standalone Process**: No longer a Celery task
+- **Persistent Connection**: Maintains WebSocket connection to `wss://api.hyperliquid.xyz/ws`
+- **Multi-coin Subscriptions**: Tracks BTC, ETH, SOL, AVAX, ARB, OP, MATIC
+- **Real-time Discovery**: Extracts trader addresses from trade streams
+- **Auto-reconnection**: Exponential backoff reconnection logic
+- **Zero API Weight**: No rate limiting concerns
 
-### 2. Service 2 - Position Tracking (REVISED)
+### Service 2: Celery Worker (2 Tasks)
 
-**Before:** `task_track_traders()` - All traders every minute
-**After:** `task_track_traders_batch()` - Batched processing with rate limiting
+**Configuration**: `app/services/celery_app.py`
 
-**New Implementation:**
+#### Task A: Batched Position Tracking
 
-- Processes exactly 50 traders per batch (BATCH_SIZE=50)
-- Uses `last_tracked_at` field with proper indexing for queue management
-- Respects rate limits: 50 traders × 20 weight = 1000 weight (safe under 1200 limit)
-- Scheduled every 75 seconds for safe rate limiting
-- Automatic queue rotation ensures all traders get tracked
+**Task**: `task_track_traders_batch()`
+**File**: `app/services/tasks/tracking_task.py`
+**Schedule**: Every 75 seconds
 
-### 3. Service 3 - Leaderboard Calculation (UNCHANGED)
+**Implementation**:
 
-- `task_calculate_leaderboard()` remains the same
-- Still runs every hour to calculate metrics
+- **Queue-based Processing**: Uses `last_tracked_at ASC NULLS FIRST` ordering
+- **Batch Size**: Configurable (default: 50 traders per batch)
+- **API Calls**: 2 weight per trader × 50 = 100 weight per batch
+- **Rate Compliance**: 80 weight/minute (93% under 1200 limit)
+- **Position Detection**: Compares states to detect OPEN/CLOSE/INCREASE/DECREASE
+- **Real-time Publishing**: Sends events to Redis pub/sub for WebSocket clients
+- **Queue Rotation**: Updates `last_tracked_at` for fair rotation
+
+#### Task B: Leaderboard Calculation
+
+**Task**: `task_calculate_leaderboard()`
+**File**: `app/services/tasks/leaderboard_task.py`
+**Schedule**: Every 10 minutes
+
+**Implementation**:
+
+- **Individual Metrics**: Account age, volume, win rate, risk ratio, drawdown
+- **Normalization**: Min-max scaling to [0,1] range
+- **Weighted Scoring**: Composite `trader_score` with configurable weights
+- **Database Updates**: Saves to `LeaderboardMetric` table
+
+### Service 3: Celery Beat Scheduler
+
+**Purpose**: Manages periodic task execution
+**Configuration**:
+
+```python
+beat_schedule = {
+    "track-traders-batch": {
+        "task": "app.services.tasks.tracking_task.task_track_traders_batch",
+        "schedule": 75.0,
+    },
+    "calculate-leaderboard": {
+        "task": "app.services.tasks.leaderboard_task.task_calculate_leaderboard",
+        "schedule": 600.0,  # 10 minutes
+    },
+}
+```
+
+### Service 4: FastAPI Web Server
+
+**File**: `app/api/main.py`
+**Features**:
+
+- **Rate-safe Endpoints**: No direct API calls, serves cached data
+- **WebSocket Distribution**: Real-time updates via `/ws/v1/updates`
+- **Redis Caching**: 5-minute TTL for leaderboard data
+- **System Statistics**: Health monitoring endpoints
 
 ## Rate Limiting Strategy
 

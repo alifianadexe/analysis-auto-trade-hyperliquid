@@ -14,7 +14,7 @@ This application now consists of 3 separate services:
 2. **Celery Workers** (async batch processing):
    - Trader position tracking
    - Leaderboard calculation
-   - Run: python -m celery -A app.services.celery_app worker --pool=solo
+   - Run: python -m celery -A app.services.celery_app worker --concurrency=4
 
 3. **WebSocket Discovery Service** (standalone):
    - Real-time trader discovery via WebSocket
@@ -39,7 +39,7 @@ if __name__ == "__main__":
     print("🚀 Starting Hyperliquid Auto Trade FastAPI Server...")
     print("📋 Make sure other services are running:")
     print("   1. WebSocket Discovery: python start_discovery_service.py")
-    print("   2. Celery Worker: python -m celery -A app.services.celery_app worker --pool=solo")
+    print("   2. Celery Worker: python -m celery -A app.services.celery_app worker --concurrency=4")
     print("   3. Celery Beat: python -m celery -A app.services.celery_app beat")
     print("")
     
