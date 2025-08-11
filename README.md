@@ -4,56 +4,52 @@ A comprehensive copy trading platform for Hyperliquid that discovers successful 
 
 ## 🏗️ Architecture Overview
 
-The application consists of three main services with a rate-limiting optimized design:
+The application now consists of **4 separate services** managed by a process manager:
 
 ```
 ┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
 │  Hyperliquid    │    │   Service 1:         │    │   PostgreSQL    │
-│  WebSocket      │◄──►│   Discovery Stream   │───►│   Database      │
-│  (Real-time)    │    │   (WebSocket)        │    │   (Batched)     │
+│  WebSocket      │◄──►│   Discovery Service  │───►│   Database      │
+│  (Real-time)    │    │   (Standalone)       │    │   (Batched)     │
 └─────────────────┘    └──────────────────────┘    └─────────────────┘
                                                             │
 ┌─────────────────┐    ┌──────────────────────┐            │
 │  Redis Pub/Sub  │◄──►│   Service 2:         │◄───────────┘
-│  Real-time      │    │   Batched Tracking   │
-│  Events         │    │   (50 traders/75s)   │
+│  Real-time      │    │   Celery Worker      │
+│  Events         │    │   (Batch Tracking)   │
 └─────────────────┘    └──────────────────────┘
         │                        │
         │               ┌──────────────────────┐
         │               │   Service 3:         │
-        │               │   Leaderboard Calc   │
+        │               │   Celery Beat        │
+        │               │   (Task Scheduler)   │
         │               └──────────────────────┘
         │                        │
         ▼               ┌─────────────────┐
-┌─────────────────┐    │   Redis Cache   │
-│  FastAPI Web    │◄──►│   (5min TTL)    │
-│  Server         │    └─────────────────┘
-│  (Rate-Safe)    │
-└─────────────────┘
-        │
-        ▼
-┌─────────────────┐
-│  WebSocket      │
-│  Clients        │
-│  (/ws/v1/updates) │
-└─────────────────┘
+┌─────────────────┐    │   Service 4:    │
+│  WebSocket      │◄──►│   FastAPI Web   │
+│  Clients        │    │   Server        │
+│  (/ws/v1/updates) │   │   (Rate-Safe)   │
+└─────────────────┘    └─────────────────┘
 ```
+
+### 🚀 New Process Management System
+
+**Linux Process Manager** (`process_manager.py`):
+
+- Manages all 4 services with dependency handling
+- Automatic restart on crashes (up to 5 attempts)
+- Service monitoring and health checks
+- Centralized logging to `logs/` directory
+- Graceful shutdown with proper signal handling
+- Linux process groups with `os.setsid` for clean shutdown
 
 ### Core Components
 
-1. **Service 1 (Real-time Discovery)**: WebSocket connection to discover traders from live trade streams
-2. **Service 2 (Batched Tracking)**: Rate-limited batch processing of trader positions (50 traders per 75 seconds)
-3. **Service 3 (Leaderboard Calculation)**: Calculates performance metrics hourly
-4. **FastAPI Web Server**: Rate-safe REST API and WebSocket distribution (no direct API calls)
-5. **Redis**: Handles caching and real-time pub/sub messaging
-6. **PostgreSQL**: Stores trader data with optimized indexes for batching
-
-### 🚦 Rate Limiting Strategy
-
-- **WebSocket Discovery**: Zero API weight cost, real-time trader detection
-- **Batched Tracking**: 50 traders × 20 weight = 1000 weight per 75 seconds = 800 weight/minute (safe under 1200 limit)
-- **FastAPI Endpoints**: No direct API calls, serves cached data only
-- **Queue Management**: Database indexes optimize trader rotation for batching
+1. **WebSocket Discovery Service** (Standalone): Real-time trader discovery via WebSocket
+2. **Celery Worker**: Batched trader position tracking and leaderboard calculation
+3. **Celery Beat Scheduler**: Manages periodic task execution
+4. **FastAPI Web Server**: Rate-safe REST API and WebSocket distribution
 
 ## 📋 Prerequisites
 
@@ -72,8 +68,7 @@ cd auto-trade-hyperliquid
 
 # Create virtual environment
 python -m venv .venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
+source .venv/bin/activate  # Linux
 
 # Install dependencies
 pip install -r requirements.txt
@@ -133,26 +128,37 @@ Create the database tables:
 python init_db.py
 ```
 
-### 5. Start Services
+### 5. Start All Services (Recommended)
 
-You need to run these in separate terminal windows:
+**Option A: Process Manager (Recommended)**
 
-**Terminal 1 - FastAPI Web Server:**
+Start all services with automatic management:
 
 ```bash
+# Linux startup script
+chmod +x start_all_services.sh
+./start_all_services.sh
+
+# Or directly with Python
+python process_manager.py
+```
+
+**Option B: Manual Service Startup**
+
+If you prefer to run services manually in separate terminals:
+
+```bash
+# Terminal 1 - WebSocket Discovery Service
+python start_discovery_service.py
+
+# Terminal 2 - Celery Worker
+python -m celery -A app.services.celery_app worker --loglevel=info --concurrency=4
+
+# Terminal 3 - Celery Beat Scheduler
+python -m celery -A app.services.celery_app beat --loglevel=info
+
+# Terminal 4 - FastAPI Web Server
 python run.py
-```
-
-**Terminal 2 - Celery Worker:**
-
-```bash
-celery -A app.services.celery_app worker --loglevel=info
-```
-
-**Terminal 3 - Celery Beat Scheduler:**
-
-```bash
-celery -A app.services.celery_app beat --loglevel=info
 ```
 
 ### 6. Access the Application
@@ -160,6 +166,73 @@ celery -A app.services.celery_app beat --loglevel=info
 - **API Documentation**: http://localhost:8000/docs
 - **Health Check**: http://localhost:8000/health
 - **Leaderboard**: http://localhost:8000/api/v1/leaderboard
+- **Service Logs**: Check `logs/` directory for individual service logs
+
+## 🛠️ Process Management
+
+### Service Control Commands
+
+**Using the Process Manager:**
+
+```bash
+# Start all services
+python process_manager.py
+
+# View service logs
+python service_control.py logs websocket-discovery
+python service_control.py logs celery-worker
+python service_control.py logs celery-beat
+python service_control.py logs fastapi-server
+
+# Check service status (within process manager)
+# Status is displayed every 30 seconds automatically
+```
+
+**Individual Service Management:**
+
+```bash
+# Start individual services
+python service_control.py start websocket-discovery
+python service_control.py start celery-worker
+
+# View logs for specific service
+python service_control.py logs websocket-discovery
+```
+
+### Service Dependencies
+
+The process manager handles service dependencies automatically:
+
+1. **WebSocket Discovery Service** starts first (no dependencies)
+2. **Celery Worker** starts second (depends on Redis/Database)
+3. **Celery Beat Scheduler** starts third (depends on Celery Worker)
+4. **FastAPI Web Server** starts last (depends on all data services)
+
+### Log Files
+
+All services log to individual files in the `logs/` directory:
+
+```
+logs/
+├── process_manager.log      # Process manager activity
+├── websocket-discovery.log  # WebSocket service logs
+├── websocket-discovery.error.log
+├── celery-worker.log        # Celery worker logs
+├── celery-worker.error.log
+├── celery-beat.log          # Celery beat scheduler logs
+├── celery-beat.error.log
+├── fastapi-server.log       # FastAPI web server logs
+└── fastapi-server.error.log
+```
+
+### Process Manager Features
+
+- **Automatic Restart**: Services are restarted automatically if they crash (up to 5 attempts)
+- **Dependency Management**: Services start in correct order based on dependencies
+- **Health Monitoring**: Monitors service health every 10 seconds
+- **Graceful Shutdown**: Handles Ctrl+C and shutdown signals properly
+- **Service Status**: Displays real-time status every 30 seconds
+- **Resource Tracking**: Shows PID, uptime, and restart count for each service
 
 ## 📊 Database Schema
 
@@ -563,7 +636,7 @@ python run.py
 2. Start Celery worker (in a separate terminal):
 
 ```bash
-celery -A app.services.celery_app worker --loglevel=info
+
 ```
 
 3. Start Celery beat scheduler (in another terminal):
