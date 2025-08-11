@@ -2,12 +2,12 @@ from celery import Celery
 from app.core.config import settings
 
 # Create Celery app instance with 'app' as the main module name
+# Note: discovery_task removed as it runs as standalone WebSocket service
 celery_app = Celery(
     "app",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
-        "app.services.tasks.discovery_task",
         "app.services.tasks.tracking_task", 
         "app.services.tasks.leaderboard_task"
     ]
@@ -28,12 +28,8 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000
 )
 
-# Periodic tasks configuration (beat_schedule) - REVISED for WebSocket + Batching
+# Periodic tasks configuration (beat_schedule) - WebSocket discovery now runs standalone
 celery_app.conf.beat_schedule = {
-    "manage-discovery-stream": {
-        "task": "app.services.tasks.discovery_task.task_manage_discovery_stream",
-        "schedule": 30.0 * 60,  # Every 30 minutes (restart WebSocket connection)
-    },
     "track-traders-batch": {
         "task": "app.services.tasks.tracking_task.task_track_traders_batch",
         "schedule": 75.0,  # Every 75 seconds (safe rate limiting: configurable BATCH_SIZE * 20 weight)
