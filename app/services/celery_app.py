@@ -8,8 +8,8 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.services.tasks.discovery_task",
-        "app.services.tasks.tracking_task", 
-        "app.services.tasks.leaderboard_task"
+        # "app.services.tasks.tracking_task", 
+        # "app.services.tasks.leaderboard_task"
     ]
 )
 
@@ -26,6 +26,13 @@ celery_app.conf.update(
     task_soft_time_limit=25 * 60,  # 25 minutes
     worker_prefetch_multiplier=1,
     worker_max_tasks_per_child=1000,
+    # Windows-specific fixes
+    # worker_pool='solo',  # Use solo pool for Windows
+    # task_always_eager=False,  # Ensure tasks run asynchronously
+    # task_eager_propagates=True,
+    # result_expires=3600,  # Expire results after 1 hour
+    # broker_connection_retry_on_startup=True,  # Fix deprecation warning
+    # worker_disable_rate_limits=True,  # Disable rate limits for better async handling
 )
 
 # Periodic tasks configuration (beat_schedule) - REVISED for WebSocket + Batching
@@ -34,12 +41,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.services.tasks.discovery_task.task_manage_discovery_stream",
         "schedule": 30.0 * 60,  # Every 30 minutes (restart WebSocket connection)
     },
-    "track-traders-batch": {
-        "task": "app.services.tasks.tracking_task.task_track_traders_batch",
-        "schedule": 75.0,  # Every 75 seconds (safe rate limiting: configurable BATCH_SIZE * 20 weight)
-    },
-    "calculate-leaderboard": {
-        "task": "app.services.tasks.leaderboard_task.task_calculate_leaderboard",
-        "schedule": 60.0 * 60,  # Every 1 hour
-    },
+    # "track-traders-batch": {
+    #     "task": "app.services.tasks.tracking_task.task_track_traders_batch",
+    #     "schedule": 75.0,  # Every 75 seconds (safe rate limiting: configurable BATCH_SIZE * 20 weight)
+    # },
+    # "calculate-leaderboard": {
+    #     "task": "app.services.tasks.leaderboard_task.task_calculate_leaderboard",
+    #     "schedule": 60.0 * 60,  # Every 1 hour
+    # },
 }

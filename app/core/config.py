@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     HYPERLIQUID_WALLET_ADDRESS: Optional[str] = None
     
     # Popular coins to track (stored as string, accessed as list via property)
-    POPULAR_COINS_STR: str = Field(default="BTC,ETH,SOL,AVAX,ARB,OP,MATIC", alias="POPULAR_COINS")
+    POPULAR_COINS_STR: str = Field(default="SUI", alias="POPULAR_COINS")
     
     # Task configuration settings
     BATCH_SIZE: int = Field(default=50, description="Number of traders to process per batch")

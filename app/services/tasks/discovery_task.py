@@ -14,6 +14,7 @@ from datetime import datetime
 
 from app.services.celery_app import celery_app
 from app.core.config import settings
+from app.database.models import Trader
 from .utils import get_db, get_or_create_trader
 
 logger = logging.getLogger(__name__)
@@ -22,15 +23,66 @@ logger = logging.getLogger(__name__)
 @celery_app.task
 def task_manage_discovery_stream():
     """REVISED Task 1: Discover Traders via WebSocket (Service 1)"""
+    # Force logging to work in Celery
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True
+    )
+    local_logger = logging.getLogger(__name__)
+    
+    local_logger.info("🚀 Starting discovery task in Celery")
+    
     try:
-        asyncio.run(_manage_discovery_stream_async())
-        logger.info("Discovery stream task completed")
+        # Create a new event loop for this task
+        import asyncio
+        
+        # On Windows with Celery, we need to be very explicit about event loop handling
+        try:
+            loop = asyncio.get_running_loop()
+            local_logger.warning("Event loop already running, creating new one")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        except RuntimeError:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    local_logger.info("Event loop is closed, creating new one")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                local_logger.info("No event loop, creating new one")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        
+        local_logger.info("Running async discovery task...")
+        
+        # Run with a timeout to prevent hanging
+        try:
+            loop.run_until_complete(asyncio.wait_for(_manage_discovery_stream_async(), timeout=1800))  # 30 minute timeout
+            local_logger.info("✅ Discovery stream task completed successfully")
+        except asyncio.TimeoutError:
+            local_logger.warning("Discovery task timed out after 30 minutes")
+        
     except Exception as e:
-        logger.error(f"Error in task_manage_discovery_stream: {e}")
+        local_logger.error(f"❌ Error in task_manage_discovery_stream: {e}")
+        import traceback
+        local_logger.error(f"Traceback: {traceback.format_exc()}")
+    finally:
+        # Always try to clean up
+        try:
+            current_loop = asyncio.get_event_loop()
+            if not current_loop.is_closed():
+                local_logger.info("Cleaning up event loop")
+                current_loop.close()
+        except Exception as e:
+            local_logger.error(f"Error cleaning up event loop: {e}")
 
 
 async def _manage_discovery_stream_async():
     """Async implementation of WebSocket-based trader discovery"""
+    logger.info("🔌 Starting WebSocket connection process")
     max_retries = 5
     retry_count = 0
     
@@ -38,11 +90,14 @@ async def _manage_discovery_stream_async():
         try:
             # Connect to Hyperliquid WebSocket
             websocket_url = "wss://api.hyperliquid.xyz/ws"
+            logger.info(f"Attempting to connect to {websocket_url}")
+            
             async with websockets.connect(websocket_url) as websocket:
-                logger.info("Connected to Hyperliquid WebSocket")
+                logger.info("✅ Connected to Hyperliquid WebSocket")
                 
-                # Subscribe to trade feeds for popular coins
-                coins_to_track = ["BTC", "ETH", "SOL", "AVAX", "ARB", "OP", "MATIC"]
+                # Subscribe to trade feeds for popular coins from configuration
+                coins_to_track = settings.POPULAR_COINS
+                logger.info(f"📈 Tracking coins from config: {coins_to_track}")
                 
                 for coin in coins_to_track:
                     subscription = {
@@ -53,12 +108,17 @@ async def _manage_discovery_stream_async():
                         }
                     }
                     await websocket.send(json.dumps(subscription))
-                    logger.info(f"Subscribed to trades for {coin}")
+                    logger.info(f"✅ Subscribed to trades for {coin}")
                 
                 # Listen for messages
+                message_count = 0
                 async for message in websocket:
                     try:
                         data = json.loads(message)
+                        message_count += 1
+                        
+                        if message_count % 100 == 0:  # Log every 100 messages
+                            logger.info(f"📨 Processed {message_count} messages")
                         
                         # Process trade messages
                         if "data" in data and isinstance(data["data"], list):
@@ -69,19 +129,19 @@ async def _manage_discovery_stream_async():
                     except Exception as e:
                         logger.error(f"Error processing WebSocket message: {e}")
                         
-        except websockets.exceptions.ConnectionClosed:
+        except websockets.exceptions.ConnectionClosed as e:
             retry_count += 1
             wait_time = min(60, 2 ** retry_count)  # Exponential backoff, max 60 seconds
-            logger.warning(f"WebSocket connection closed. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+            logger.warning(f"⚠️ WebSocket connection closed: {e}. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
             await asyncio.sleep(wait_time)
             
         except Exception as e:
             retry_count += 1
             wait_time = min(60, 2 ** retry_count)
-            logger.error(f"WebSocket error: {e}. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
+            logger.error(f"❌ WebSocket error: {e}. Retrying in {wait_time} seconds... (attempt {retry_count}/{max_retries})")
             await asyncio.sleep(wait_time)
     
-    logger.error(f"Max retries ({max_retries}) exceeded. Discovery stream task failed.")
+    logger.error(f"💀 Max retries ({max_retries}) exceeded. Discovery stream task failed.")
 
 
 async def _process_trade_messages(trades: List[Dict[str, Any]]):
@@ -89,21 +149,27 @@ async def _process_trade_messages(trades: List[Dict[str, Any]]):
     db = get_db()
     try:
         new_traders_found = 0
+        processed_addresses = set()  # Avoid counting duplicates in same batch
         
         for trade in trades:
             try:
                 # Extract trader addresses from the "users" array in the trade data
                 if "users" in trade and isinstance(trade["users"], list):
                     for user_address in trade["users"]:
-                        if not user_address:
+                        if not user_address or user_address in processed_addresses:
                             continue
-                            
-                        # Use helper function to get or create trader
-                        trader = get_or_create_trader(db, user_address)
-                        # This will be true for new traders
-                        if hasattr(trader, 'first_seen_at') and trader.first_seen_at:
-                            if not hasattr(trader, '_sa_instance_state'):  # Check for new traders
+                        
+                        processed_addresses.add(user_address)
+                        
+                        # Check if trader already exists
+                        existing_trader = db.query(Trader).filter(Trader.address == user_address).first()
+                        
+                        if not existing_trader:
+                            # Create new trader
+                            trader = get_or_create_trader(db, user_address)
+                            if trader:
                                 new_traders_found += 1
+                                logger.debug(f"Discovered new trader: {user_address[:10]}...")
                         
             except Exception as e:
                 logger.error(f"Error processing trade message: {e}")

@@ -46,19 +46,28 @@ class HyperliquidClient:
         self.base_url = settings.HYPERLIQUID_API_URL.rstrip('/info')  # Remove /info if present
         self.info_url = f"{self.base_url}/info"
         self.exchange_url = f"{self.base_url}/exchange"
-        self.session = httpx.AsyncClient(timeout=30.0)
+        self.session = None
         self.rate_limiter = RateLimiter()
+    
+    async def _get_session(self):
+        """Get or create HTTP session"""
+        if self.session is None or self.session.is_closed:
+            self.session = httpx.AsyncClient(timeout=30.0)
+        return self.session
     
     async def close(self):
         """Close the HTTP session"""
-        await self.session.aclose()
+        if self.session and not self.session.is_closed:
+            await self.session.aclose()
+            self.session = None
     
     async def _make_request(self, url: str, payload: Dict[str, Any], weight: int = 20) -> Optional[Dict[str, Any]]:
         """Make a request with rate limiting"""
         try:
             await self.rate_limiter.wait_if_needed(weight)
             
-            response = await self.session.post(url, json=payload)
+            session = await self._get_session()
+            response = await session.post(url, json=payload)
             response.raise_for_status()
             
             return response.json()

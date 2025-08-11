@@ -28,10 +28,29 @@ redis_client = redis.Redis.from_url(str(settings.REDIS_URL), decode_responses=Tr
 def task_track_traders_batch():
     """REVISED Task 2: Track Traders in Batches (Service 2)"""
     try:
-        asyncio.run(_track_traders_batch_async())
+        # Create a new event loop for this task
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        loop.run_until_complete(_track_traders_batch_async())
         logger.info("Completed trader batch tracking task")
     except Exception as e:
         logger.error(f"Error in task_track_traders_batch: {e}")
+    finally:
+        # Clean up the event loop
+        try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_closed():
+                loop.close()
+        except:
+            pass
 
 
 async def _track_traders_batch_async():
@@ -54,11 +73,15 @@ async def _track_traders_batch_async():
         
         for trader in batch_traders:
             try:
+                logger.debug(f"Tracking trader {trader.address[:10]}...")
+                
                 # Get current user state using the optimized client (weight: 2)
                 current_state = await hyperliquid_client.get_user_state(trader.address)
                 
                 if current_state is None:
-                    logger.warning(f"Failed to fetch state for trader {trader.address}")
+                    logger.warning(f"Failed to fetch state for trader {trader.address[:10]}...")
+                    # Still update last_tracked_at to avoid getting stuck on this trader
+                    trader.last_tracked_at = datetime.utcnow()
                     continue
                 
                 # Get most recent state history for comparison
@@ -107,8 +130,13 @@ async def _track_traders_batch_async():
                 
                 successful_tracks += 1
                 
+                # Add small delay to respect rate limits
+                await asyncio.sleep(0.1)  # 100ms delay between API calls
+                
             except Exception as e:
-                logger.error(f"Error tracking trader {trader.address}: {e}")
+                logger.error(f"Error tracking trader {trader.address[:10]}...: {e}")
+                # Still update last_tracked_at to avoid getting stuck
+                trader.last_tracked_at = datetime.utcnow()
         
         db.commit()
         logger.info(f"Successfully tracked {successful_tracks}/{len(batch_traders)} traders")
