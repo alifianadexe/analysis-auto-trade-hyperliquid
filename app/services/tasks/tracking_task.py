@@ -27,30 +27,17 @@ redis_client = redis.Redis.from_url(str(settings.REDIS_URL), decode_responses=Tr
 @celery_app.task
 def task_track_traders_batch():
     """REVISED Task 2: Track Traders in Batches (Service 2)"""
+    logger.info("🚀 Starting trader batch tracking task")
+    
     try:
-        # Create a new event loop for this task
         import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        asyncio.run(_track_traders_batch_async())
+        logger.info("✅ Completed trader batch tracking task")
         
-        loop.run_until_complete(_track_traders_batch_async())
-        logger.info("Completed trader batch tracking task")
     except Exception as e:
-        logger.error(f"Error in task_track_traders_batch: {e}")
-    finally:
-        # Clean up the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_closed():
-                loop.close()
-        except:
-            pass
+        logger.error(f"❌ Error in task_track_traders_batch: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 async def _track_traders_batch_async():

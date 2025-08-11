@@ -23,61 +23,17 @@ logger = logging.getLogger(__name__)
 @celery_app.task
 def task_manage_discovery_stream():
     """REVISED Task 1: Discover Traders via WebSocket (Service 1)"""
-    # Force logging to work in Celery
-    import logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        force=True
-    )
-    local_logger = logging.getLogger(__name__)
-    
-    local_logger.info("🚀 Starting discovery task in Celery")
+    logger.info("🚀 Starting discovery task")
     
     try:
-        # Create a new event loop for this task
         import asyncio
-        
-        # On Windows with Celery, we need to be very explicit about event loop handling
-        try:
-            loop = asyncio.get_running_loop()
-            local_logger.warning("Event loop already running, creating new one")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        except RuntimeError:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    local_logger.info("Event loop is closed, creating new one")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-            except RuntimeError:
-                local_logger.info("No event loop, creating new one")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        
-        local_logger.info("Running async discovery task...")
-        
-        # Run with a timeout to prevent hanging
-        try:
-            loop.run_until_complete(asyncio.wait_for(_manage_discovery_stream_async(), timeout=1800))  # 30 minute timeout
-            local_logger.info("✅ Discovery stream task completed successfully")
-        except asyncio.TimeoutError:
-            local_logger.warning("Discovery task timed out after 30 minutes")
+        asyncio.run(_manage_discovery_stream_async())
+        logger.info("✅ Discovery stream task completed successfully")
         
     except Exception as e:
-        local_logger.error(f"❌ Error in task_manage_discovery_stream: {e}")
+        logger.error(f"❌ Error in task_manage_discovery_stream: {e}")
         import traceback
-        local_logger.error(f"Traceback: {traceback.format_exc()}")
-    finally:
-        # Always try to clean up
-        try:
-            current_loop = asyncio.get_event_loop()
-            if not current_loop.is_closed():
-                local_logger.info("Cleaning up event loop")
-                current_loop.close()
-        except Exception as e:
-            local_logger.error(f"Error cleaning up event loop: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 async def _manage_discovery_stream_async():
