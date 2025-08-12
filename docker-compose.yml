@@ -1,5 +1,6 @@
 
 services:
+  # Infrastructure Services
   postgres:
     image: postgres:15
     container_name: hyperliquid_postgres
@@ -12,6 +13,11 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hyperliquid_user -d hyperliquid_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -21,7 +27,117 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Application Services
+  discovery-service:
+    build: .
+    container_name: hyperliquid_discovery
+    environment:
+      - DATABASE_URL=postgresql://hyperliquid_user:hyperliquid_password@postgres:5432/hyperliquid_db
+      - REDIS_URL=redis://redis:6379
+      - HYPERLIQUID_API_URL=https://api.hyperliquid.xyz/info
+      - WEBSOCKET_URL=wss://api.hyperliquid.xyz/ws
+      - POPULAR_COINS=BTC,ETH,SOL,AVAX,ARB,OP,MATIC
+      - DEBUG=False
+    command: ["python", "start_discovery_service.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - hyperliquid_network
+
+  celery-worker:
+    build: .
+    container_name: hyperliquid_worker
+    environment:
+      - DATABASE_URL=postgresql://hyperliquid_user:hyperliquid_password@postgres:5432/hyperliquid_db
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379
+      - CELERY_RESULT_BACKEND=redis://redis:6379
+      - HYPERLIQUID_API_URL=https://api.hyperliquid.xyz/info
+      - BATCH_SIZE=50
+      - DEBUG=False
+    command: ["python", "-m", "celery", "-A", "app.services.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      discovery-service:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - hyperliquid_network
+
+  celery-beat:
+    build: .
+    container_name: hyperliquid_beat
+    environment:
+      - DATABASE_URL=postgresql://hyperliquid_user:hyperliquid_password@postgres:5432/hyperliquid_db
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379
+      - CELERY_RESULT_BACKEND=redis://redis:6379
+      - HYPERLIQUID_API_URL=https://api.hyperliquid.xyz/info
+      - DEBUG=False
+    command: ["python", "-m", "celery", "-A", "app.services.celery_app", "beat", "--loglevel=info"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+      - celery_beat_data:/app/celerybeat-schedule
+    networks:
+      - hyperliquid_network
+
+  fastapi-server:
+    build: .
+    container_name: hyperliquid_api
+    environment:
+      - DATABASE_URL=postgresql://hyperliquid_user:hyperliquid_password@postgres:5432/hyperliquid_db
+      - REDIS_URL=redis://redis:6379
+      - HYPERLIQUID_API_URL=https://api.hyperliquid.xyz/info
+      - SECRET_KEY=your-secret-key-change-this-in-production
+      - DEBUG=False
+    command: ["python", "run.py"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      discovery-service:
+        condition: service_started
+      celery-worker:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - hyperliquid_network
+
+networks:
+  hyperliquid_network:
+    driver: bridge
 
 volumes:
   postgres_data:
   redis_data:
+  celery_beat_data:

@@ -60,7 +60,76 @@ The application consists of **4 separate services** managed by a Linux process m
 
 ## 🚀 Quick Start
 
-### 1. Clone and Setup
+Choose your deployment method:
+
+### 🐳 Option A: Docker Deployment (Recommended)
+
+**Complete containerized deployment with all services:**
+
+1. **Clone and prepare:**
+
+```bash
+git clone <your-repo-url>
+cd auto-trade-hyperliquid
+```
+
+2. **Configure environment:**
+
+```bash
+# Copy Docker environment template
+cp .env.docker .env
+
+# Edit .env with your settings (optional for basic setup)
+```
+
+3. **Deploy with Docker Compose:**
+
+```bash
+# Build and start all services
+docker-compose up -d
+
+# Wait for services to start and initialize database
+# Linux/Mac:
+chmod +x docker-init.sh
+./docker-init.sh
+
+# Windows:
+.\docker-init.ps1
+```
+
+4. **Access your platform:**
+
+- **API Documentation**: http://localhost:8000/docs
+- **Health Check**: http://localhost:8000/health
+- **Leaderboard**: http://localhost:8000/api/v1/leaderboard
+
+**Docker Service Management:**
+
+```bash
+# View all service logs
+docker-compose logs
+
+# View specific service logs
+docker-compose logs discovery-service
+docker-compose logs celery-worker
+docker-compose logs celery-beat
+docker-compose logs fastapi-server
+
+# Restart specific service
+docker-compose restart discovery-service
+
+# Stop all services
+docker-compose down
+
+# Stop and remove volumes (full cleanup)
+docker-compose down -v
+```
+
+### 🔧 Option B: Local Development Setup
+
+**For development or custom deployment:**
+
+1. **Clone and setup:**
 
 ```bash
 git clone <your-repo-url>
