@@ -42,9 +42,9 @@ services:
       - REDIS_URL=redis://redis:6379
       - HYPERLIQUID_API_URL=https://api.hyperliquid.xyz/info
       - WEBSOCKET_URL=wss://api.hyperliquid.xyz/ws
-      - POPULAR_COINS=BTC,ETH,SOL,AVAX,ARB,OP,MATIC
+      - POPULAR_COINS=SUI
       - DEBUG=False
-    command: ["python", "start_discovery_service.py"]
+    command: ["python", "app/services/discovery_service.py"]
     depends_on:
       postgres:
         condition: service_healthy
