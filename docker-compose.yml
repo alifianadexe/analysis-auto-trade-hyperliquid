@@ -53,8 +53,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
-    networks:
-      - hyperliquid_network
 
   celery-worker:
     build: .
@@ -78,8 +76,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
-    networks:
-      - hyperliquid_network
 
   celery-beat:
     build: .
@@ -102,9 +98,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
-      - celery_beat_data:/app/celerybeat-schedule
-    networks:
-      - hyperliquid_network
 
   fastapi-server:
     build: .
@@ -130,8 +123,6 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
-    networks:
-      - hyperliquid_network
 
 networks:
   hyperliquid_network:
@@ -140,4 +131,3 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  celery_beat_data:
